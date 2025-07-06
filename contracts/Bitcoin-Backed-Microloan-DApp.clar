@@ -9,6 +9,15 @@
 (define-constant ERR_INVALID_AMOUNT (err u107))
 (define-constant ERR_LOAN_ALREADY_REPAID (err u108))
 
+(define-constant ERR_EXTENSION_NOT_ALLOWED (err u109))
+(define-constant ERR_LOAN_TOO_CLOSE_TO_EXPIRY (err u110))
+(define-constant ERR_MAX_EXTENSIONS_REACHED (err u111))
+
+(define-constant EXTENSION_FEE_RATE u3)
+(define-constant EXTENSION_DURATION u72)
+(define-constant MAX_EXTENSIONS u2)
+(define-constant MIN_BLOCKS_BEFORE_EXTENSION u12)
+
 (define-constant COLLATERAL_RATIO u150)
 (define-constant INTEREST_RATE u5)
 (define-constant LOAN_DURATION u144)
@@ -211,5 +220,76 @@
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (try! (as-contract (stx-transfer? (stx-get-balance tx-sender) tx-sender CONTRACT_OWNER)))
     (ok true)
+  )
+)
+
+
+
+(define-map loan-extensions
+  { borrower: principal }
+  { extensions-used: uint }
+)
+
+(define-private (calculate-extension-fee (loan-amount uint))
+  (/ (* loan-amount EXTENSION_FEE_RATE) u100)
+)
+
+(define-private (can-extend-loan (loan-data (tuple (collateral-amount uint) (loan-amount uint) (interest-amount uint) (start-block uint) (end-block uint) (is-active bool) (is-repaid bool))) (borrower principal))
+  (let (
+    (extensions-data (default-to { extensions-used: u0 } (map-get? loan-extensions { borrower: borrower })))
+    (blocks-until-expiry (- (get end-block loan-data) stacks-block-height))
+  )
+    (and
+      (get is-active loan-data)
+      (not (get is-repaid loan-data))
+      (< (get extensions-used extensions-data) MAX_EXTENSIONS)
+      (> blocks-until-expiry MIN_BLOCKS_BEFORE_EXTENSION)
+      (not (is-loan-expired (get end-block loan-data)))
+    )
+  )
+)
+
+(define-public (extend-loan)
+  (let (
+    (borrower tx-sender)
+    (loan-data (unwrap! (map-get? loans { borrower: borrower }) ERR_LOAN_NOT_FOUND))
+    (extensions-data (default-to { extensions-used: u0 } (map-get? loan-extensions { borrower: borrower })))
+    (extension-fee (calculate-extension-fee (get loan-amount loan-data)))
+    (new-end-block (+ (get end-block loan-data) EXTENSION_DURATION))
+  )
+    (asserts! (can-extend-loan loan-data borrower) ERR_EXTENSION_NOT_ALLOWED)
+    (asserts! (>= (ft-get-balance microloan-token borrower) extension-fee) ERR_INSUFFICIENT_BALANCE)
+    
+    (try! (ft-transfer? microloan-token extension-fee borrower (as-contract tx-sender)))
+    
+    (map-set loans
+      { borrower: borrower }
+      (merge loan-data { end-block: new-end-block })
+    )
+    
+    (map-set loan-extensions
+      { borrower: borrower }
+      { extensions-used: (+ (get extensions-used extensions-data) u1) }
+    )
+    
+    (ok { new-end-block: new-end-block, fee-paid: extension-fee })
+  )
+)
+
+(define-read-only (get-extension-info (borrower principal))
+  (let (
+    (loan-data (map-get? loans { borrower: borrower }))
+    (extensions-data (default-to { extensions-used: u0 } (map-get? loan-extensions { borrower: borrower })))
+  )
+    (match loan-data
+      loan
+      {
+        can-extend: (can-extend-loan loan borrower),
+        extensions-used: (get extensions-used extensions-data),
+        max-extensions: MAX_EXTENSIONS,
+        extension-fee: (calculate-extension-fee (get loan-amount loan))
+      }
+      { can-extend: false, extensions-used: u0, max-extensions: MAX_EXTENSIONS, extension-fee: u0 }
+    )
   )
 )

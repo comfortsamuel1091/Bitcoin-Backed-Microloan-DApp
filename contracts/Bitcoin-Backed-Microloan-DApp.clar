@@ -23,6 +23,15 @@
 (define-constant LOAN_DURATION u144)
 (define-constant LIQUIDATION_PENALTY u10)
 
+(define-constant MIN_INTEREST_RATE u2)
+(define-constant MAX_INTEREST_RATE u15)
+(define-constant TARGET_UTILIZATION u70)
+(define-constant RATE_ADJUSTMENT_FACTOR u10)
+
+(define-data-var current-interest-rate uint u5)
+(define-data-var last-rate-update uint u0)
+(define-data-var rate-update-frequency uint u72)
+
 (define-fungible-token microloan-token)
 
 (define-map loans
@@ -292,4 +301,68 @@
       { can-extend: false, extensions-used: u0, max-extensions: MAX_EXTENSIONS, extension-fee: u0 }
     )
   )
+)
+
+
+(define-private (calculate-utilization-rate)
+  (let (
+    (total-stx-locked (var-get total-collateral-locked))
+    (contract-balance (stx-get-balance (as-contract tx-sender)))
+    (total-liquidity (+ total-stx-locked contract-balance))
+  )
+    (if (> total-liquidity u0)
+        (/ (* total-stx-locked u100) total-liquidity)
+        u0)
+  )
+)
+
+(define-private (calculate-new-interest-rate (utilization uint))
+  (let (
+    (rate-difference (if (> utilization TARGET_UTILIZATION)
+                        (/ (* (- utilization TARGET_UTILIZATION) RATE_ADJUSTMENT_FACTOR) u100)
+                        (/ (* (- TARGET_UTILIZATION utilization) RATE_ADJUSTMENT_FACTOR) u100)))
+    (base-rate (var-get current-interest-rate))
+    (new-rate (if (> utilization TARGET_UTILIZATION)
+                 (+ base-rate rate-difference)
+                 (if (> base-rate rate-difference)
+                     (- base-rate rate-difference)
+                     MIN_INTEREST_RATE)))
+  )
+    (if (> new-rate MAX_INTEREST_RATE)
+        MAX_INTEREST_RATE
+        (if (< new-rate MIN_INTEREST_RATE)
+            MIN_INTEREST_RATE
+            new-rate))
+  )
+)
+
+(define-private (should-update-rate)
+  (>= (- stacks-block-height (var-get last-rate-update)) (var-get rate-update-frequency))
+)
+
+(define-public (update-interest-rate)
+  (begin
+    (asserts! (should-update-rate) (err u200))
+    (let (
+      (current-utilization (calculate-utilization-rate))
+      (new-rate (calculate-new-interest-rate current-utilization))
+    )
+      (var-set current-interest-rate new-rate)
+      (var-set last-rate-update stacks-block-height)
+      (ok { new-rate: new-rate, utilization: current-utilization })
+    )
+  )
+)
+
+(define-private (get-dynamic-interest (amount uint))
+  (/ (* amount (var-get current-interest-rate)) u100)
+)
+
+(define-read-only (get-current-rate-info)
+  {
+    current-rate: (var-get current-interest-rate),
+    utilization: (calculate-utilization-rate),
+    last-update: (var-get last-rate-update),
+    can-update: (should-update-rate)
+  }
 )

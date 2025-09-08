@@ -366,3 +366,105 @@
     can-update: (should-update-rate)
   }
 )
+
+(define-map borrower-performance
+  { borrower: principal }
+  {
+    total-loans: uint,
+    successful-repayments: uint,
+    total-defaults: uint,
+    avg-repayment-speed: uint,
+    credit-score: uint,
+    last-updated: uint
+  }
+)
+
+(define-constant PERFECT_CREDIT_SCORE u850)
+(define-constant MIN_CREDIT_SCORE u300)
+(define-constant SPEED_BONUS_THRESHOLD u50)
+
+(define-private (calculate-credit-score (performance-data (tuple (total-loans uint) (successful-repayments uint) (total-defaults uint) (avg-repayment-speed uint) (credit-score uint) (last-updated uint))))
+  (let (
+    (repayment-rate (if (> (get total-loans performance-data) u0)
+                       (/ (* (get successful-repayments performance-data) u100) (get total-loans performance-data))
+                       u100))
+    (speed-bonus (if (<= (get avg-repayment-speed performance-data) SPEED_BONUS_THRESHOLD) u50 u0))
+    (default-penalty (* (get total-defaults performance-data) u30))
+    (base-score (+ (* repayment-rate u7) speed-bonus))
+    (final-score (if (> base-score default-penalty)
+                    (- base-score default-penalty)
+                    MIN_CREDIT_SCORE))
+  )
+    (if (> final-score PERFECT_CREDIT_SCORE)
+        PERFECT_CREDIT_SCORE
+        (if (< final-score MIN_CREDIT_SCORE)
+            MIN_CREDIT_SCORE
+            final-score))
+  )
+)
+
+(define-private (update-performance-on-repay (borrower principal) (loan-data (tuple (collateral-amount uint) (loan-amount uint) (interest-amount uint) (start-block uint) (end-block uint) (is-active bool) (is-repaid bool))))
+  (let (
+    (current-performance (default-to { total-loans: u0, successful-repayments: u0, total-defaults: u0, avg-repayment-speed: u0, credit-score: u750, last-updated: u0 } (map-get? borrower-performance { borrower: borrower })))
+    (repayment-speed (- (get end-block loan-data) stacks-block-height))
+    (new-avg-speed (if (> (get successful-repayments current-performance) u0)
+                      (/ (+ (* (get avg-repayment-speed current-performance) (get successful-repayments current-performance)) repayment-speed)
+                         (+ (get successful-repayments current-performance) u1))
+                      repayment-speed))
+    (updated-performance (merge current-performance {
+      successful-repayments: (+ (get successful-repayments current-performance) u1),
+      avg-repayment-speed: new-avg-speed,
+      last-updated: stacks-block-height
+    }))
+    (new-credit-score (calculate-credit-score updated-performance))
+  )
+    (map-set borrower-performance
+      { borrower: borrower }
+      (merge updated-performance { credit-score: new-credit-score })
+    )
+  )
+)
+
+(define-private (update-performance-on-default (borrower principal))
+  (let (
+    (current-performance (default-to { total-loans: u0, successful-repayments: u0, total-defaults: u0, avg-repayment-speed: u0, credit-score: u750, last-updated: u0 } (map-get? borrower-performance { borrower: borrower })))
+    (updated-performance (merge current-performance {
+      total-defaults: (+ (get total-defaults current-performance) u1),
+      last-updated: stacks-block-height
+    }))
+    (new-credit-score (calculate-credit-score updated-performance))
+  )
+    (map-set borrower-performance
+      { borrower: borrower }
+      (merge updated-performance { credit-score: new-credit-score })
+    )
+  )
+)
+
+(define-private (update-performance-on-loan-start (borrower principal))
+  (let (
+    (current-performance (default-to { total-loans: u0, successful-repayments: u0, total-defaults: u0, avg-repayment-speed: u0, credit-score: u750, last-updated: u0 } (map-get? borrower-performance { borrower: borrower })))
+  )
+    (map-set borrower-performance
+      { borrower: borrower }
+      (merge current-performance {
+        total-loans: (+ (get total-loans current-performance) u1),
+        last-updated: stacks-block-height
+      })
+    )
+  )
+)
+
+(define-read-only (get-borrower-performance (borrower principal))
+  (default-to { total-loans: u0, successful-repayments: u0, total-defaults: u0, avg-repayment-speed: u0, credit-score: u750, last-updated: u0 }
+              (map-get? borrower-performance { borrower: borrower }))
+)
+
+(define-read-only (get-system-analytics)
+  { 
+    total-loans-issued: (var-get total-loans-issued),
+    total-collateral-locked: (var-get total-collateral-locked),
+    current-utilization: (calculate-utilization-rate),
+    current-interest-rate: (var-get current-interest-rate)
+  }
+)

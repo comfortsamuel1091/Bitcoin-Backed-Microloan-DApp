@@ -28,6 +28,14 @@
 (define-constant TARGET_UTILIZATION u70)
 (define-constant RATE_ADJUSTMENT_FACTOR u10)
 
+(define-constant REFERRER_REWARD u100)
+(define-constant REFEREE_REWARD u50)
+(define-constant ERR_ALREADY_REGISTERED (err u300))
+(define-constant ERR_INVALID_REFERRER (err u301))
+(define-constant ERR_REWARD_ALREADY_CLAIMED (err u302))
+(define-constant ERR_FIRST_LOAN_NOT_COMPLETED (err u303))
+(define-constant ERR_SELF_REFERRAL (err u304))
+
 (define-data-var current-interest-rate uint u5)
 (define-data-var last-rate-update uint u0)
 (define-data-var rate-update-frequency uint u72)
@@ -466,5 +474,101 @@
     total-collateral-locked: (var-get total-collateral-locked),
     current-utilization: (calculate-utilization-rate),
     current-interest-rate: (var-get current-interest-rate)
+  }
+)
+
+(define-map referral-relationships
+  { referee: principal }
+  { referrer: principal, registered-at: uint }
+)
+
+(define-map referral-rewards
+  { user: principal }
+  { reward-claimed: bool, claim-block: uint, total-referrals: uint }
+)
+
+(define-data-var total-referrals-made uint u0)
+(define-data-var total-rewards-distributed uint u0)
+
+(define-private (has-completed-first-loan (borrower principal))
+  (match (map-get? borrower-performance { borrower: borrower })
+    performance
+    (and 
+      (>= (get successful-repayments performance) u1)
+      (>= (get total-loans performance) u1)
+    )
+    false
+  )
+)
+
+(define-public (register-referral (referrer principal))
+  (let (
+    (referee tx-sender)
+    (existing-relationship (map-get? referral-relationships { referee: referee }))
+  )
+    (asserts! (is-none existing-relationship) ERR_ALREADY_REGISTERED)
+    (asserts! (not (is-eq referee referrer)) ERR_SELF_REFERRAL)
+    
+    (map-set referral-relationships
+      { referee: referee }
+      { referrer: referrer, registered-at: stacks-block-height }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (claim-referral-reward)
+  (let (
+    (referee tx-sender)
+    (relationship-data (unwrap! (map-get? referral-relationships { referee: referee }) ERR_INVALID_REFERRER))
+    (reward-data (default-to { reward-claimed: false, claim-block: u0, total-referrals: u0 } (map-get? referral-rewards { user: referee })))
+    (referrer (get referrer relationship-data))
+    (referrer-reward-data (default-to { reward-claimed: false, claim-block: u0, total-referrals: u0 } (map-get? referral-rewards { user: referrer })))
+  )
+    (asserts! (not (get reward-claimed reward-data)) ERR_REWARD_ALREADY_CLAIMED)
+    (asserts! (has-completed-first-loan referee) ERR_FIRST_LOAN_NOT_COMPLETED)
+    
+    (try! (as-contract (ft-transfer? microloan-token REFEREE_REWARD tx-sender referee)))
+    (try! (as-contract (ft-transfer? microloan-token REFERRER_REWARD tx-sender referrer)))
+    
+    (map-set referral-rewards
+      { user: referee }
+      { reward-claimed: true, claim-block: stacks-block-height, total-referrals: u0 }
+    )
+    
+    (map-set referral-rewards
+      { user: referrer }
+      { reward-claimed: (get reward-claimed referrer-reward-data), claim-block: (get claim-block referrer-reward-data), total-referrals: (+ (get total-referrals referrer-reward-data) u1) }
+    )
+    
+    (var-set total-referrals-made (+ (var-get total-referrals-made) u1))
+    (var-set total-rewards-distributed (+ (var-get total-rewards-distributed) (+ REFERRER_REWARD REFEREE_REWARD)))
+    
+    (ok { referee-reward: REFEREE_REWARD, referrer-reward: REFERRER_REWARD })
+  )
+)
+
+(define-read-only (get-referral-info (user principal))
+  (let (
+    (relationship (map-get? referral-relationships { referee: user }))
+    (rewards (default-to { reward-claimed: false, claim-block: u0, total-referrals: u0 } (map-get? referral-rewards { user: user })))
+  )
+    {
+      is-registered: (is-some relationship),
+      referrer: relationship,
+      reward-claimed: (get reward-claimed rewards),
+      total-referrals-made: (get total-referrals rewards),
+      can-claim: (and (is-some relationship) (not (get reward-claimed rewards)) (has-completed-first-loan user))
+    }
+  )
+)
+
+(define-read-only (get-referral-stats)
+  {
+    total-referrals: (var-get total-referrals-made),
+    total-rewards-distributed: (var-get total-rewards-distributed),
+    referrer-reward-amount: REFERRER_REWARD,
+    referee-reward-amount: REFEREE_REWARD
   }
 )

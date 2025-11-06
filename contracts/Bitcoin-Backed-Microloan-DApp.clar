@@ -36,6 +36,12 @@
 (define-constant ERR_FIRST_LOAN_NOT_COMPLETED (err u303))
 (define-constant ERR_SELF_REFERRAL (err u304))
 
+(define-constant ERR_EXPOSURE_LIMIT_EXCEEDED (err u400))
+(define-constant ERR_INVALID_EXPOSURE_LIMIT (err u401))
+(define-constant DEFAULT_MAX_EXPOSURE_PCT u25)
+
+(define-data-var max-single-borrower-exposure uint u25)
+
 (define-data-var current-interest-rate uint u5)
 (define-data-var last-rate-update uint u0)
 (define-data-var rate-update-frequency uint u72)
@@ -571,4 +577,77 @@
     referrer-reward-amount: REFERRER_REWARD,
     referee-reward-amount: REFEREE_REWARD
   }
+)
+
+(define-private (calculate-borrower-exposure-pct (borrower principal) (proposed-loan-amount uint))
+  (let (
+    (current-loan-data (map-get? loans { borrower: borrower }))
+    (existing-exposure (match current-loan-data
+                         loan (get loan-amount loan)
+                         u0))
+    (total-exposure (+ existing-exposure proposed-loan-amount))
+    (total-system-liquidity (var-get total-supply))
+  )
+    (if (> total-system-liquidity u0)
+        (/ (* total-exposure u100) total-system-liquidity)
+        u0)
+  )
+)
+
+(define-private (validate-exposure-limit (borrower principal) (proposed-loan-amount uint))
+  (let (
+    (exposure-pct (calculate-borrower-exposure-pct borrower proposed-loan-amount))
+    (max-allowed (var-get max-single-borrower-exposure))
+  )
+    (<= exposure-pct max-allowed)
+  )
+)
+
+(define-public (set-max-borrower-exposure (new-limit uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (and (> new-limit u0) (<= new-limit u100)) ERR_INVALID_EXPOSURE_LIMIT)
+    (var-set max-single-borrower-exposure new-limit)
+    (ok true)
+  )
+)
+
+(define-read-only (get-portfolio-concentration)
+  (let (
+    (total-liquidity (var-get total-supply))
+    (total-deployed (- total-liquidity (ft-get-balance microloan-token (as-contract tx-sender))))
+    (deployment-rate (if (> total-liquidity u0)
+                        (/ (* total-deployed u100) total-liquidity)
+                        u0))
+  )
+    {
+      total-system-liquidity: total-liquidity,
+      total-deployed-capital: total-deployed,
+      deployment-rate: deployment-rate,
+      max-single-exposure-limit: (var-get max-single-borrower-exposure),
+      available-liquidity: (ft-get-balance microloan-token (as-contract tx-sender))
+    }
+  )
+)
+
+(define-read-only (get-borrower-exposure-info (borrower principal))
+  (let (
+    (loan-data (map-get? loans { borrower: borrower }))
+    (current-exposure (match loan-data
+                        loan (get loan-amount loan)
+                        u0))
+    (total-liquidity (var-get total-supply))
+    (exposure-pct (if (> total-liquidity u0)
+                     (/ (* current-exposure u100) total-liquidity)
+                     u0))
+  )
+    {
+      current-loan-amount: current-exposure,
+      exposure-percentage: exposure-pct,
+      max-allowed-percentage: (var-get max-single-borrower-exposure),
+      remaining-capacity: (if (>= current-exposure u0) 
+                           (- (/ (* total-liquidity (var-get max-single-borrower-exposure)) u100) current-exposure)
+                           u0)
+    }
+  )
 )
